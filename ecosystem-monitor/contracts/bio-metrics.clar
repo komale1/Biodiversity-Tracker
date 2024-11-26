@@ -10,6 +10,8 @@
 (define-constant ERR_UNAUTHORIZED (err u104))
 (define-constant ERR_INVALID_STATUS (err u105))
 (define-constant ERR_ZERO_VALUE (err u106))
+(define-constant ERR_INVALID_ECOSYSTEM (err u107))
+(define-constant ERR_INVALID_SPECIES (err u108))
 
 ;; Data structures
 (define-map biodiversity-ecosystems 
@@ -56,42 +58,60 @@
     (is-eq tx-sender contract-administrator)
 )
 
+;; Enhanced string validation function
+(define-private (validate-string-enhanced (input (string-ascii 100)))
+    (let 
+        (
+            (input-length (len input))
+        )
+        (asserts! (> input-length u0) ERR_INVALID_DATA)
+        (asserts! (<= input-length u100) ERR_INVALID_DATA)
+        (ok input)
+    )
+)
+
 ;; Ecosystem management functions
 (define-public (register-new-ecosystem (ecosystem-name (string-ascii 50)) 
                                      (geographic-location (string-ascii 100)) 
                                      (total-area-hectares uint))
-    (let
-        (
-            (new-ecosystem-id (var-get next-available-ecosystem-id))
-        )
+    (begin
         (asserts! (is-contract-administrator) ERR_OWNER_ONLY)
         (asserts! (> (len ecosystem-name) u0) ERR_INVALID_DATA)
         (asserts! (> total-area-hectares u0) ERR_ZERO_VALUE)
         
-        (map-insert biodiversity-ecosystems
-            { ecosystem-identifier: new-ecosystem-id }
-            {
-                ecosystem-name: ecosystem-name,
-                geographic-location: geographic-location,
-                total-area-hectares: total-area-hectares,
-                ecosystem-creation-block: block-height,
-                last-update-block: block-height
-            }
+        (let
+            (
+                (new-ecosystem-id (var-get next-available-ecosystem-id))
+                (validated-location (unwrap! (validate-string-enhanced geographic-location) ERR_INVALID_DATA))
+            )
+            ;; Check the validation result before using
+            (asserts! (is-some (some validated-location)) ERR_INVALID_DATA)
+            
+            (map-insert biodiversity-ecosystems
+                { ecosystem-identifier: new-ecosystem-id }
+                {
+                    ecosystem-name: ecosystem-name,
+                    geographic-location: validated-location,
+                    total-area-hectares: total-area-hectares,
+                    ecosystem-creation-block: block-height,
+                    last-update-block: block-height
+                }
+            )
+            
+            (map-insert ecosystem-biodiversity-metrics
+                { ecosystem-identifier: new-ecosystem-id }
+                {
+                    total-species-count: u0,
+                    ecosystem-diversity-index: u0,
+                    threatened-species-count: u0,
+                    last-assessment-block: block-height
+                }
+            )
+            
+            (var-set next-available-ecosystem-id (+ new-ecosystem-id u1))
+            (var-set ecosystem-registration-count (+ (var-get ecosystem-registration-count) u1))
+            (ok new-ecosystem-id)
         )
-        
-        (map-insert ecosystem-biodiversity-metrics
-            { ecosystem-identifier: new-ecosystem-id }
-            {
-                total-species-count: u0,
-                ecosystem-diversity-index: u0,
-                threatened-species-count: u0,
-                last-assessment-block: block-height
-            }
-        )
-        
-        (var-set next-available-ecosystem-id (+ new-ecosystem-id u1))
-        (var-set ecosystem-registration-count (+ (var-get ecosystem-registration-count) u1))
-        (ok new-ecosystem-id)
     )
 )
 
@@ -99,25 +119,33 @@
                                     (updated-name (string-ascii 50))
                                     (updated-location (string-ascii 100))
                                     (updated-area-hectares uint))
-    (let
-        (
-            (existing-ecosystem-data (unwrap! (map-get? biodiversity-ecosystems { ecosystem-identifier: ecosystem-identifier }) ERR_NOT_FOUND))
-        )
+    (begin
         (asserts! (is-contract-administrator) ERR_OWNER_ONLY)
         (asserts! (> (len updated-name) u0) ERR_INVALID_DATA)
         (asserts! (> updated-area-hectares u0) ERR_ZERO_VALUE)
+        (asserts! (is-ecosystem-registered ecosystem-identifier) ERR_INVALID_ECOSYSTEM)
         
-        (map-set biodiversity-ecosystems
-            { ecosystem-identifier: ecosystem-identifier }
-            {
-                ecosystem-name: updated-name,
-                geographic-location: updated-location,
-                total-area-hectares: updated-area-hectares,
-                ecosystem-creation-block: (get ecosystem-creation-block existing-ecosystem-data),
-                last-update-block: block-height
-            }
+        (let
+            (
+                (existing-ecosystem-data (unwrap! (map-get? biodiversity-ecosystems { ecosystem-identifier: ecosystem-identifier }) ERR_NOT_FOUND))
+                (validated-location (unwrap! (validate-string-enhanced updated-location) ERR_INVALID_DATA))
+            )
+            ;; Check the validation result before using
+            (asserts! (is-some (some validated-location)) ERR_INVALID_DATA)
+            
+            (ok
+                (map-set biodiversity-ecosystems
+                    { ecosystem-identifier: ecosystem-identifier }
+                    {
+                        ecosystem-name: updated-name,
+                        geographic-location: validated-location,
+                        total-area-hectares: updated-area-hectares,
+                        ecosystem-creation-block: (get ecosystem-creation-block existing-ecosystem-data),
+                        last-update-block: block-height
+                    }
+                )
+            )
         )
-        (ok true)
     )
 )
 
@@ -127,47 +155,53 @@
                                    (initial-population uint)
                                    (ecosystem-identifier uint)
                                    (conservation-status (string-ascii 20)))
-    (let
-        (
-            (new-species-id (var-get next-available-species-id))
-            (current-ecosystem-metrics (unwrap! (map-get? ecosystem-biodiversity-metrics { ecosystem-identifier: ecosystem-identifier }) ERR_NOT_FOUND))
-        )
+    (begin
         (asserts! (is-contract-administrator) ERR_OWNER_ONLY)
         (asserts! (> (len common-name) u0) ERR_INVALID_DATA)
         (asserts! (> initial-population u0) ERR_ZERO_VALUE)
+        (asserts! (is-ecosystem-registered ecosystem-identifier) ERR_INVALID_ECOSYSTEM)
         (asserts! (or (is-eq conservation-status "threatened")
                      (is-eq conservation-status "stable")
                      (is-eq conservation-status "endangered")
                      (is-eq conservation-status "extinct")) ERR_INVALID_STATUS)
         
-        (map-insert biodiversity-species
-            { species-identifier: new-species-id }
-            {
-                common-name: common-name,
-                taxonomic-name: taxonomic-name,
-                current-population: initial-population,
-                ecosystem-identifier: ecosystem-identifier,
-                species-conservation-status: conservation-status,
-                last-census-block: block-height
-            }
+        (let
+            (
+                (new-species-id (var-get next-available-species-id))
+                (current-ecosystem-metrics (unwrap! (map-get? ecosystem-biodiversity-metrics { ecosystem-identifier: ecosystem-identifier }) ERR_NOT_FOUND))
+                (validated-taxonomic-name (unwrap! (validate-string-enhanced taxonomic-name) ERR_INVALID_DATA))
+            )
+            ;; Check the validation result before using
+            (asserts! (is-some (some validated-taxonomic-name)) ERR_INVALID_DATA)
+            
+            (map-insert biodiversity-species
+                { species-identifier: new-species-id }
+                {
+                    common-name: common-name,
+                    taxonomic-name: validated-taxonomic-name,
+                    current-population: initial-population,
+                    ecosystem-identifier: ecosystem-identifier,
+                    species-conservation-status: conservation-status,
+                    last-census-block: block-height
+                }
+            )
+            
+            (map-set ecosystem-biodiversity-metrics
+                { ecosystem-identifier: ecosystem-identifier }
+                {
+                    total-species-count: (+ (get total-species-count current-ecosystem-metrics) u1),
+                    ecosystem-diversity-index: (+ (get ecosystem-diversity-index current-ecosystem-metrics) u1),
+                    threatened-species-count: (if (is-eq conservation-status "threatened")
+                                             (+ (get threatened-species-count current-ecosystem-metrics) u1)
+                                             (get threatened-species-count current-ecosystem-metrics)),
+                    last-assessment-block: block-height
+                }
+            )
+            
+            (var-set next-available-species-id (+ new-species-id u1))
+            (var-set species-registration-count (+ (var-get species-registration-count) u1))
+            (ok new-species-id)
         )
-        
-        ;; Update ecosystem metrics
-        (map-set ecosystem-biodiversity-metrics
-            { ecosystem-identifier: ecosystem-identifier }
-            {
-                total-species-count: (+ (get total-species-count current-ecosystem-metrics) u1),
-                ecosystem-diversity-index: (+ (get ecosystem-diversity-index current-ecosystem-metrics) u1),
-                threatened-species-count: (if (is-eq conservation-status "threatened")
-                                         (+ (get threatened-species-count current-ecosystem-metrics) u1)
-                                         (get threatened-species-count current-ecosystem-metrics)),
-                last-assessment-block: block-height
-            }
-        )
-        
-        (var-set next-available-species-id (+ new-species-id u1))
-        (var-set species-registration-count (+ (var-get species-registration-count) u1))
-        (ok new-species-id)
     )
 )
 
@@ -186,6 +220,7 @@
                      (is-eq updated-conservation-status "stable")
                      (is-eq updated-conservation-status "endangered")
                      (is-eq updated-conservation-status "extinct")) ERR_INVALID_STATUS)
+        (asserts! (is-species-registered species-identifier) ERR_INVALID_SPECIES)
         
         (map-set biodiversity-species
             { species-identifier: species-identifier }
